@@ -1,0 +1,767 @@
+import sqlite3
+from tkinter import *
+from tkinter import ttk, messagebox
+import tkinter as tk
+from datetime import datetime, timedelta, date
+
+# --- 1. Configuração e Funções do Banco de Dados SQLite ---
+DB_NAME = 'estoque_barbearia.db'
+
+def setup_db():
+    """Cria a tabela de produtos se ela não existir."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS produtos (
+            id INTEGER PRIMARY KEY,
+            nome TEXT NOT NULL,
+            categoria TEXT NOT NULL,
+            quantidade REAL NOT NULL,
+            minimo INTEGER NOT NULL,
+            preco_custo REAL DEFAULT 0,
+            preco_venda REAL DEFAULT 0
+        )
+    ''')
+    # Tenta adicionar colunas se a tabela já existir sem elas
+    try:
+        cursor.execute("ALTER TABLE produtos ADD COLUMN preco_custo REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE produtos ADD COLUMN preco_venda REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    # Cria tabela de movimentações
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS movimentacoes (
+            id INTEGER PRIMARY KEY,
+            produto_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL,
+            quantidade REAL NOT NULL,
+            preco_unitario REAL NOT NULL,
+            data_hora TEXT NOT NULL,
+            FOREIGN KEY (produto_id) REFERENCES produtos (id)
+        )
+    ''')
+    
+    # Cria tabela de serviços
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS servicos (
+            id INTEGER PRIMARY KEY,
+            servico TEXT NOT NULL,
+            valor REAL NOT NULL,
+            barbeiro TEXT NOT NULL,
+            data_hora TEXT NOT NULL
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    
+
+def execute_query(query, params=()):
+    """Função genérica para executar comandos SQL."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    conn.commit()
+    conn.close()
+
+# --- 2. Funções de Manipulação de Estoque ---
+
+def adicionar_produto(nome, categoria, quantidade, minimo):
+    """Cadastra um novo produto."""
+    # Validação robusta de entrada
+    if not nome or not categoria:
+        messagebox.showerror("Erro de Validação", "Nome e categoria não podem estar vazios.")
+        return
+        
+    try:
+        # Verifica se a string contém apenas dígitos e/ou um ponto decimal
+        if not all(c.isdigit() or c == '.' for c in quantidade.strip()):
+            messagebox.showerror("Erro de Validação", "Quantidade deve conter apenas números e ponto decimal.")
+            return
+            
+        if not all(c.isdigit() for c in minimo.strip()):
+            messagebox.showerror("Erro de Validação", "Estoque mínimo deve conter apenas números inteiros.")
+            return
+            
+        quantidade = float(quantidade)
+        minimo = int(minimo)
+        
+        if quantidade < 0:
+            messagebox.showerror("Erro de Validação", "Quantidade não pode ser negativa.")
+            return
+            
+        if minimo < 0:
+            messagebox.showerror("Erro de Validação", "Estoque mínimo não pode ser negativo.")
+            return
+            
+        execute_query(
+            "INSERT INTO produtos (nome, categoria, quantidade, minimo, preco_custo, preco_venda) VALUES (?, ?, ?, ?, 0, 0)",
+            (nome, categoria, quantidade, minimo)
+        )
+        messagebox.showinfo("Sucesso", f"Produto '{nome}' cadastrado com sucesso!")
+        atualizar_listagem()
+    except ValueError:
+        messagebox.showerror("Erro de Entrada", "Quantidade e Estoque Mínimo devem ser números válidos.")
+
+def atualizar_estoque(produto_id, delta, tipo_mov=None, preco_unit=None):
+    """Aumenta ou diminui a quantidade de um produto."""
+    try:
+        # Validação robusta da entrada
+        if not all(c.isdigit() or c == '.' or c == '-' for c in str(delta).strip()):
+            messagebox.showerror("Erro de Validação", "Quantidade deve conter apenas números, ponto decimal ou sinal negativo.")
+            return
+            
+        delta = float(delta)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT quantidade, nome, preco_custo, preco_venda, minimo FROM produtos WHERE id=?", (produto_id,))
+        resultado = cursor.fetchone()
+        quantidade_atual = resultado[0]
+        nome_produto = resultado[1]
+        preco_custo_atual = resultado[2]
+        preco_venda_atual = resultado[3]
+        minimo_produto = resultado[4]
+        conn.close()
+
+        nova_quantidade = quantidade_atual + delta
+
+        if nova_quantidade < 0:
+            messagebox.showwarning("Atenção", "Operação cancelada: A quantidade não pode ser negativa!")
+            return
+
+        execute_query(
+            "UPDATE produtos SET quantidade = ? WHERE id = ?",
+            (nova_quantidade, produto_id)
+        )
+
+        messagebox.showinfo("Sucesso", f"Estoque atualizado. Nova quantidade: {nova_quantidade}")
+
+        # Alerta baseado no mínimo do produto
+        if nova_quantidade < minimo_produto:
+            # Melhor feedback visual com tags de alerta
+            messagebox.showwarning("⚠️ ALERTA - Estoque Baixo!",
+                                f"O produto {nome_produto} está com estoque ABAIXO do mínimo configurado!\n"
+                                f"Quantidade atual: {nova_quantidade}\n"
+                                f"Mínimo configurado: {minimo_produto}\n"
+                                f"Recomenda-se repor o estoque urgentemente.")
+
+        # registra movimentação se tipo informado
+        if tipo_mov:
+            if preco_unit is None or str(preco_unit).strip() == "":
+                preco_unit = preco_custo_atual if tipo_mov == "ENTRADA" else preco_venda_atual
+            try:
+                preco_unit = float(preco_unit)
+            except:
+                preco_unit = preco_custo_atual if tipo_mov == "ENTRADA" else preco_venda_atual
+
+            agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tipo_norm = "ENTRADA" if tipo_mov == "ENTRADA" else "SAIDA"
+            execute_query(
+                "INSERT INTO movimentacoes (produto_id, tipo, quantidade, preco_unitario, data_hora) VALUES (?, ?, ?, ?, ?)",
+                (produto_id, tipo_norm, abs(delta), preco_unit, agora)
+            )
+
+        atualizar_listagem()
+
+    except Exception as e:
+        messagebox.showerror("Erro", f"Ocorreu um erro ao atualizar o estoque: {e}")
+
+# --- Funções para Serviços ---
+
+def registrar_servico(servico, valor, barbeiro):
+    """Registra um novo serviço no banco de dados."""
+    try:
+        valor_float = float(valor)
+        if valor_float <= 0:
+            messagebox.showerror("Erro", "O valor deve ser maior que zero.")
+            return False
+        
+        agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_query(
+            "INSERT INTO servicos (servico, valor, barbeiro, data_hora) VALUES (?, ?, ?, ?)",
+            (servico, valor_float, barbeiro, agora)
+        )
+        return True
+    except ValueError:
+        messagebox.showerror("Erro", "Valor deve ser um número válido.")
+        return False
+    except Exception as e:
+        messagebox.showerror("Erro", f"Erro ao registrar serviço: {e}")
+        return False
+
+def abrir_janela_servico():
+    # Seleciona a aba "Registrar Serviço" em vez de abrir Toplevel
+    notebook.select(tab_servico)
+
+def calcular_resumo_servicos(periodo_inicio=None, periodo_fim=None):
+    """Retorna estatísticas dos serviços no período especificado."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    params = []
+    filtro_data = ""
+    
+    if periodo_inicio and periodo_fim:
+        filtro_data = " WHERE datetime(data_hora) BETWEEN datetime(?) AND datetime(?)"
+        params.extend([periodo_inicio + " 00:00:00", periodo_fim + " 23:59:59"])
+
+    # Consulta para obter estatísticas por tipo de serviço
+    cursor.execute(
+        """
+        SELECT servico, 
+               COUNT(*) as quantidade, 
+               SUM(valor) as total,
+               barbeiro,
+               COUNT(CASE WHEN barbeiro = barbeiro THEN 1 END) as qtd_barbeiro,
+               SUM(CASE WHEN barbeiro = barbeiro THEN valor ELSE 0 END) as total_barbeiro
+        FROM servicos
+        """ + filtro_data + """
+        GROUP BY servico, barbeiro
+        ORDER BY servico, barbeiro
+        """,
+        params
+    )
+    dados_servicos = cursor.fetchall()
+    
+    # Consulta para obter o total de serviços no período
+    cursor.execute(
+        """
+        SELECT SUM(valor) as total_servicos
+        FROM servicos
+        """ + filtro_data,
+        params
+    )
+    total_servicos = cursor.fetchone()[0] or 0
+    
+    conn.close()
+    return dados_servicos, total_servicos
+
+# --- 3. Funções da Interface Gráfica (Tkinter) ---
+
+def atualizar_listagem():
+    """Limpa e preenche a Treeview com os dados atualizados do banco."""
+    for i in tree.get_children():
+        tree.delete(i)
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nome, categoria, quantidade, minimo, preco_custo, preco_venda FROM produtos ORDER BY categoria, nome")
+    registros = cursor.fetchall()
+    conn.close()
+
+    # Configurando as tags para melhor feedback visual
+    tree.tag_configure('alerta', background='#ffcccc')  # Vermelho claro para alerta
+    tree.tag_configure('odd', background='#f0f0f0')     # Cinza claro para linhas ímpares
+    tree.tag_configure('even', background='#ffffff')    # Branco para linhas pares
+
+    for idx, registro in enumerate(registros):
+        (id, nome, categoria, quantidade, minimo, preco_custo, preco_venda) = registro
+        tags = []
+        # Usando o mínimo do produto para determinar o alerta
+        if quantidade < minimo:
+            tags.append('alerta')
+        tags.append('odd' if idx % 2 == 1 else 'even')
+        tree.insert('', 'end', values=(id, nome, categoria, quantidade, minimo, preco_custo, preco_venda), tags=tuple(tags))
+
+def abrir_janela_cadastro():
+    """Abre a janela para cadastrar um novo produto."""
+    janela_c = Toplevel(root)
+    janela_c.title("Cadastrar Produto")
+    janela_c.geometry("300x250")
+    janela_c.configure(bg='#B6B6B6')
+
+    Label(janela_c, text="Nome:", bg='#B6B6B6').pack(pady=5)
+    nome_e = Entry(janela_c)
+    nome_e.pack()
+
+    Label(janela_c, text="Categoria:", bg='#B6B6B6').pack(pady=5)
+    categoria_e = ttk.Combobox(janela_c, values=["Pomada", "Shampoo", "Frigobar", "Outro Insumo"], state="readonly")
+    categoria_e.pack()
+    categoria_e.current(0)
+
+    Label(janela_c, text="Qtd. Inicial:", bg='#B6B6B6').pack(pady=5)
+    qtd_e = Entry(janela_c)
+    qtd_e.insert(0, "0")
+    qtd_e.pack()
+
+    Label(janela_c, text="Qtd. Mínima:", bg='#B6B6B6').pack(pady=5)
+    min_e = Entry(janela_c)
+    min_e.insert(0, "0")
+    min_e.pack()
+
+    Button(janela_c, text="Cadastrar", bg="#BBD4F2", fg="black",
+           command=lambda: adicionar_produto(nome_e.get(), categoria_e.get(), qtd_e.get(), min_e.get())).pack(pady=10)
+
+def abrir_janela_precos():
+    """Abre janela para definir preço de custo e venda do produto selecionado."""
+    if not tree.selection():
+        messagebox.showwarning("Atenção", "Selecione um produto na lista primeiro.")
+        return
+
+    item = tree.item(tree.focus())
+    produto_id = item['values'][0]
+    nome_produto = item['values'][1]
+    preco_custo_atual = item['values'][5] if len(item['values']) > 5 else 0
+    preco_venda_atual = item['values'][6] if len(item['values']) > 6 else 0
+
+    janela_p = Toplevel(root)
+    janela_p.title(f"Definir Preços: {nome_produto}")
+    janela_p.geometry("300x220")
+    janela_p.configure(bg='#B6B6B6')
+
+    Label(janela_p, text=f"Produto: {nome_produto}", bg='#B6B6B6').pack(pady=10)
+    Label(janela_p, text="Preço de Custo (R$):", bg='#B6B6B6').pack(pady=5)
+    e_custo = Entry(janela_p)
+    e_custo.insert(0, str(preco_custo_atual))
+    e_custo.pack()
+    Label(janela_p, text="Preço de Venda (R$):", bg='#B6B6B6').pack(pady=5)
+    e_venda = Entry(janela_p)
+    e_venda.insert(0, str(preco_venda_atual))
+    e_venda.pack()
+
+    def salvar():
+        try:
+            custo = float(e_custo.get())
+            venda = float(e_venda.get())
+            execute_query("UPDATE produtos SET preco_custo=?, preco_venda=? WHERE id=?", (custo, venda, produto_id))
+            messagebox.showinfo("Sucesso", "Preços atualizados!")
+            atualizar_listagem()
+            janela_p.destroy()
+        except:
+            messagebox.showerror("Erro", "Valores inválidos de preço.")
+
+    Button(janela_p, text="Salvar", bg="#BBD4F2", fg="black", command=salvar).pack(pady=10)
+
+def abrir_janela_movimentacao(tipo):
+    """Abre a janela para Entrada ou Saída de estoque."""
+    if not tree.selection():
+        messagebox.showwarning("Atenção", "Selecione um produto na lista primeiro.")
+        return
+
+    item_selecionado = tree.item(tree.focus())
+    produto_id = item_selecionado['values'][0]
+    nome_produto = item_selecionado['values'][1]
+
+    janela_m = Toplevel(root)
+    janela_m.title(f"{tipo} de Estoque: {nome_produto}")
+    janela_m.geometry("300x200")
+    janela_m.configure(bg='#B6B6B6')
+
+    delta_sinal = 1 if tipo == "ENTRADA" else -1
+
+    Label(janela_m, text=f"Produto: {nome_produto}", bg='#B6B6B6').pack(pady=10)
+    Label(janela_m, text=f"Quantidade para {tipo}:", bg='#B6B6B6').pack(pady=5)
+
+    qtd_m = Entry(janela_m)
+    qtd_m.insert(0, "1")
+    qtd_m.pack()
+
+    Label(janela_m, text="Preço unitário (opcional):", bg='#B6B6B6').pack(pady=5)
+    preco_e = Entry(janela_m)
+    preco_e.pack()
+
+    Button(janela_m, text=tipo, bg="#BBD4F2", fg="black",
+           command=lambda: [
+               atualizar_estoque(
+                   produto_id,
+                   float(qtd_m.get()) * delta_sinal,
+                   tipo_mov=("ENTRADA" if tipo == "ENTRADA" else "SAIDA"),
+                   preco_unit=preco_e.get()
+               ),
+               janela_m.destroy()
+           ]).pack(pady=10)
+
+def calcular_resumo_caixa(periodo_inicio=None, periodo_fim=None, produto_id=None):
+    """Retorna lista com (produto_id, nome, qtd_entrada, qtd_saida, total_compra, total_venda).
+    Se produto_id for informado, retorna apenas para esse produto.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    params = []
+    filtro_data = ""
+    filtro_prod = ""
+    if produto_id:
+        filtro_prod = " WHERE p.id = ?"
+        params.append(produto_id)
+    if periodo_inicio and periodo_fim:
+        if produto_id:
+            filtro_data = " AND datetime(data_hora) BETWEEN datetime(?) AND datetime(?)"
+        else:
+            filtro_data = " WHERE datetime(data_hora) BETWEEN datetime(?) AND datetime(?)"
+        params.extend([periodo_inicio + " 00:00:00", periodo_fim + " 23:59:59"])
+
+    cursor.execute(
+        """
+        SELECT p.id, p.nome,
+               SUM(CASE WHEN m.tipo='ENTRADA' THEN m.quantidade ELSE 0 END) AS qtd_entrada,
+               SUM(CASE WHEN m.tipo='SAIDA' THEN m.quantidade ELSE 0 END) AS qtd_saida,
+               SUM(CASE WHEN m.tipo='ENTRADA' THEN m.quantidade*m.preco_unitario ELSE 0 END) AS total_compra,
+               SUM(CASE WHEN m.tipo='SAIDA' THEN m.quantidade*m.preco_unitario ELSE 0 END) AS total_venda
+        FROM produtos p
+        LEFT JOIN movimentacoes m ON m.produto_id = p.id
+        WHERE 1=1
+        """ + 
+        (f" AND p.id = ?" if produto_id else "") +
+        (f" AND datetime(m.data_hora) BETWEEN datetime(?) AND datetime(?)" if periodo_inicio and periodo_fim else "") +
+        """
+        GROUP BY p.id, p.nome
+        ORDER BY p.nome
+        """,
+        params
+    )
+    dados = cursor.fetchall()
+    conn.close()
+    return dados
+
+def abrir_janela_fechamento_caixa():
+    janela_f = Toplevel(root)
+    janela_f.title("Fechamento de Caixa")
+    janela_f.geometry("900x600")  # Aumentado para acomodar a nova tabela
+    janela_f.configure(bg='#B6B6B6')
+
+    # Frame para filtros rápidos
+    frame_filtros_rapidos = Frame(janela_f, bg='#B6B6B6')
+    frame_filtros_rapidos.pack(pady=5, fill="x")
+    
+    # Funções para os filtros rápidos
+    def aplicar_filtro_hoje():
+        hoje = date.today().strftime("%Y-%m-%d")
+        e_ini.delete(0, END)
+        e_fim.delete(0, END)
+        e_ini.insert(0, hoje)
+        e_fim.insert(0, hoje)
+        carregar()
+        
+    def aplicar_filtro_ontem():
+        ontem = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        e_ini.delete(0, END)
+        e_fim.delete(0, END)
+        e_ini.insert(0, ontem)
+        e_fim.insert(0, ontem)
+        carregar()
+        
+    def aplicar_filtro_mes_atual():
+        hoje = date.today()
+        primeiro_dia = date(hoje.year, hoje.month, 1).strftime("%Y-%m-%d")
+        e_ini.delete(0, END)
+        e_fim.delete(0, END)
+        e_ini.insert(0, primeiro_dia)
+        e_fim.insert(0, hoje.strftime("%Y-%m-%d"))
+        carregar()
+        
+    def aplicar_filtro_mes_anterior():
+        hoje = date.today()
+        primeiro_dia_mes_anterior = date(hoje.year, hoje.month-1 if hoje.month > 1 else 12, 1)
+        if hoje.month == 1:
+            ultimo_dia_mes_anterior = date(hoje.year-1, 12, 31)
+        else:
+            ultimo_dia_mes_anterior = date(hoje.year, hoje.month, 1) - timedelta(days=1)
+        
+        e_ini.delete(0, END)
+        e_fim.delete(0, END)
+        e_ini.insert(0, primeiro_dia_mes_anterior.strftime("%Y-%m-%d"))
+        e_fim.insert(0, ultimo_dia_mes_anterior.strftime("%Y-%m-%d"))
+        carregar()
+        
+    def aplicar_filtro_ultimos_30_dias():
+        hoje = date.today()
+        data_30_dias_atras = (hoje - timedelta(days=30)).strftime("%Y-%m-%d")
+        e_ini.delete(0, END)
+        e_fim.delete(0, END)
+        e_ini.insert(0, data_30_dias_atras)
+        e_fim.insert(0, hoje.strftime("%Y-%m-%d"))
+        carregar()
+    
+    # Botões de filtros rápidos
+    Label(frame_filtros_rapidos, text="Filtros Rápidos:", bg='#B6B6B6', font=("Arial", 10, "bold")).pack(side=LEFT, padx=5)
+    
+    btn_hoje = Button(frame_filtros_rapidos, text="Hoje", bg="#BBD4F2", fg="black", command=aplicar_filtro_hoje)
+    btn_hoje.pack(side=LEFT, padx=2)
+    
+    btn_ontem = Button(frame_filtros_rapidos, text="Ontem", bg="#BBD4F2", fg="black", command=aplicar_filtro_ontem)
+    btn_ontem.pack(side=LEFT, padx=2)
+    
+    btn_mes_atual = Button(frame_filtros_rapidos, text="Mês Atual", bg="#BBD4F2", fg="black", command=aplicar_filtro_mes_atual)
+    btn_mes_atual.pack(side=LEFT, padx=2)
+    
+    btn_mes_anterior = Button(frame_filtros_rapidos, text="Mês Anterior", bg="#BBD4F2", fg="black", command=aplicar_filtro_mes_anterior)
+    btn_mes_anterior.pack(side=LEFT, padx=2)
+    
+    btn_30_dias = Button(frame_filtros_rapidos, text="Últimos 30 dias", bg="#BBD4F2", fg="black", command=aplicar_filtro_ultimos_30_dias)
+    btn_30_dias.pack(side=LEFT, padx=2)
+    
+    # Frame para filtros personalizados
+    frame_filtros = Frame(janela_f, bg='#B6B6B6')
+    frame_filtros.pack(pady=5, fill="x")
+    
+    Label(frame_filtros, text="Período:", bg='#B6B6B6').pack(side=LEFT, padx=5)
+    Label(frame_filtros, text="De:", bg='#B6B6B6').pack(side=LEFT)
+    e_ini = Entry(frame_filtros, width=10)
+    e_ini.pack(side=LEFT, padx=2)
+    e_ini.insert(0, date.today().strftime("%Y-%m-%d"))
+    
+    Label(frame_filtros, text="Até:", bg='#B6B6B6').pack(side=LEFT)
+    e_fim = Entry(frame_filtros, width=10)
+    e_fim.pack(side=LEFT, padx=2)
+    e_fim.insert(0, date.today().strftime("%Y-%m-%d"))
+    
+    # Frame para resultados
+    frame_resultados = Frame(janela_f, bg='#B6B6B6')
+    frame_resultados.pack(pady=10, fill="both", expand=True)
+    
+    # Função para carregar os dados
+    def carregar():
+        # Limpa o frame de resultados
+        for widget in frame_resultados.winfo_children():
+            widget.destroy()
+            
+        data_ini = e_ini.get()
+        data_fim = e_fim.get()
+        
+        # Verifica formato das datas
+        try:
+            datetime.strptime(data_ini, "%Y-%m-%d")
+            datetime.strptime(data_fim, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Erro", "Formato de data inválido. Use AAAA-MM-DD")
+            return
+            
+        # Carrega dados de produtos
+        dados_produtos = calcular_resumo_caixa(data_ini, data_fim)
+        
+        # Carrega dados de serviços
+        dados_servicos, total_servicos = calcular_resumo_servicos(data_ini, data_fim)
+        
+        # Cria frame para produtos
+        frame_produtos = LabelFrame(frame_resultados, text="Movimentação de Produtos", bg='#B6B6B6', font=("Arial", 10, "bold"))
+        frame_produtos.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Cria tabela para produtos
+        cols_produtos = ('Produto', 'Entradas', 'Saídas', 'Compras (R$)', 'Vendas (R$)', 'Lucro (R$)')
+        tree_produtos = ttk.Treeview(frame_produtos, columns=cols_produtos, show='headings', height=8)
+        
+        for col in cols_produtos:
+            tree_produtos.heading(col, text=col)
+            tree_produtos.column(col, width=100, anchor=CENTER)
+        
+        tree_produtos.column('Produto', width=200, anchor=W)
+        
+        # Preenche a tabela de produtos
+        total_compras = 0
+        total_vendas = 0
+        total_lucro = 0
+        
+        for item in dados_produtos:
+            produto_id, nome, qtd_entrada, qtd_saida, total_compra, total_venda = item
+            lucro = total_venda - total_compra
+            tree_produtos.insert('', 'end', values=(nome, qtd_entrada, qtd_saida, f"R$ {total_compra:.2f}", f"R$ {total_venda:.2f}", f"R$ {lucro:.2f}"))
+            total_compras += total_compra
+            total_vendas += total_venda
+            total_lucro += lucro
+            
+        # Adiciona linha de totais
+        tree_produtos.insert('', 'end', values=('TOTAL', '', '', f"R$ {total_compras:.2f}", f"R$ {total_vendas:.2f}", f"R$ {total_lucro:.2f}"))
+        
+        tree_produtos.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Cria frame para serviços
+        frame_servicos = LabelFrame(frame_resultados, text="Serviços Realizados", bg='#B6B6B6', font=("Arial", 10, "bold"))
+        frame_servicos.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Cria tabela para serviços
+        cols_servicos = ('Serviço', 'Qtd', 'Total (R$)', 'Barbeiro', 'Qtd por Barbeiro', 'Total por Barbeiro (R$)')
+        tree_servicos = ttk.Treeview(frame_servicos, columns=cols_servicos, show='headings', height=8)
+        
+        for col in cols_servicos:
+            tree_servicos.heading(col, text=col)
+            tree_servicos.column(col, width=100, anchor=CENTER)
+        
+        tree_servicos.column('Serviço', width=150, anchor=W)
+        tree_servicos.column('Barbeiro', width=100, anchor=W)
+        
+        # Preenche a tabela de serviços
+        for item in dados_servicos:
+            servico, qtd, total, barbeiro, qtd_barbeiro, total_barbeiro = item
+            tree_servicos.insert('', 'end', values=(servico, qtd, f"R$ {total:.2f}", barbeiro, qtd_barbeiro, f"R$ {total_barbeiro:.2f}"))
+            
+        tree_servicos.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Cria frame para resumo final
+        frame_resumo = LabelFrame(frame_resultados, text="RESUMO DO PERÍODO", bg='#B6B6B6', font=("Arial", 10, "bold"))
+        frame_resumo.pack(fill="both", padx=5, pady=5)
+        
+        # Adiciona informações do resumo
+        Label(frame_resumo, text=f"Total em Serviços: R$ {total_servicos:.2f}", bg='#B6B6B6', font=("Arial", 10)).pack(anchor='w', padx=10, pady=2)
+        Label(frame_resumo, text=f"Total em Produtos: R$ {total_lucro:.2f}", bg='#B6B6B6', font=("Arial", 10)).pack(anchor='w', padx=10, pady=2)
+        Label(frame_resumo, text=f"Total Geral: R$ {(total_servicos + total_lucro):.2f}", bg='#B6B6B6', font=("Arial", 10, "bold")).pack(anchor='w', padx=10, pady=2)
+    
+    # Botão para carregar
+    Button(frame_filtros, text="Carregar", bg="#BBD4F2", fg="black", command=carregar).pack(side=LEFT, padx=10)
+    
+    # Carrega os dados iniciais
+    carregar()
+
+# --- 4. Configuração da Janela Principal ---
+
+setup_db()
+
+root = Tk()
+root.title("Gestão de Estoque - BARBEARIA")
+root.geometry("1920x1080")
+root.configure(bg='#B6B6B6')
+
+container = Frame(root, bg='#B6B6B6')
+container.pack(pady=10, padx=10, fill="both", expand=True)
+
+# Barra lateral à esquerda
+sidebar = Frame(container, bg='#B6B6B6')
+sidebar.pack(side="left", fill="y")
+
+# Utilitário para criar tiles laterais estilo cartão com ícone e texto
+def criar_tile(parent, titulo, icone_texto, on_click):
+    tile_bg = '#BBD4F2'
+    tile_bg_hover = '#A7C5EA'
+    frame = Frame(parent, bg=tile_bg, bd=1, relief='raised')
+    frame.pack(pady=3, padx=2, anchor='w', fill='x')  # Pequeno espaçamento entre as caixas
+    # tamanho consistente
+    frame.configure(width=180, height=70)
+    frame.pack_propagate(False)
+
+    icone = Label(frame, text=icone_texto, bg=tile_bg, fg='black', font=("Arial", 18, "bold"))
+    icone.pack(pady=(8,0))
+    titulo_lbl = Label(frame, text=titulo, bg=tile_bg, fg='black', font=("Arial", 10, "bold"))
+    titulo_lbl.pack(pady=(2,8))
+
+    def enter(_):
+        frame.configure(bg=tile_bg_hover)
+        icone.configure(bg=tile_bg_hover)
+        titulo_lbl.configure(bg=tile_bg_hover)
+    def leave(_):
+        frame.configure(bg=tile_bg)
+        icone.configure(bg=tile_bg)
+        titulo_lbl.configure(bg=tile_bg)
+    def click(_):
+        if callable(on_click):
+            on_click()
+    for w in (frame, icone, titulo_lbl):
+        w.bind('<Enter>', enter)
+        w.bind('<Leave>', leave)
+        w.bind('<Button-1>', click)
+        w.configure(cursor='hand2')
+    return frame
+
+# Área central com notebook (abas)
+notebook = ttk.Notebook(container)
+notebook.pack(side="left", padx=10, fill="both", expand=True)
+
+# Aba "Estoque" - migra a tabela existente
+frame_tabela = Frame(notebook, bg='#B6B6B6')
+notebook.add(frame_tabela, text="Estoque")
+
+colunas = ('ID', 'Produto', 'Categoria', 'Qtd. Atual', 'Qtd. Mínima', 'Preço Custo', 'Preço Venda')
+tree = ttk.Treeview(frame_tabela, columns=colunas, show='headings')
+
+tree.column('ID', width=50, anchor=CENTER)
+tree.column('Produto', width=250, anchor=W)
+tree.column('Categoria', width=120, anchor=CENTER)
+tree.column('Qtd. Atual', width=100, anchor=CENTER)
+tree.column('Qtd. Mínima', width=100, anchor=CENTER)
+tree.column('Preço Custo', width=100, anchor=CENTER)
+tree.column('Preço Venda', width=100, anchor=CENTER)
+
+for col in colunas:
+    tree.heading(col, text=col)
+
+# Estilo visual da Treeview e cabeçalhos
+style = ttk.Style()
+try:
+    style.theme_use('default')
+except:
+    pass
+style.configure('Treeview', background='#D0D0D0', fieldbackground='#D0D0D0', foreground='black')
+style.map('Treeview', background=[('selected', '#9BBEEA')])
+style.configure('Treeview.Heading', background='#BBD4F2', foreground='black')
+
+# Tags para listras e alerta dentro da tree principal
+tree.tag_configure('odd', background='#C9C9C9')
+tree.tag_configure('even', background='#D9D9D9')
+tree.tag_configure('alerta', background='#F2C9C9')
+
+tree.pack(side="left", fill="both", expand=True)
+
+scrollbar = ttk.Scrollbar(frame_tabela, orient="vertical", command=tree.yview)
+tree.configure(yscrollcommand=scrollbar.set)
+scrollbar.pack(side="right", fill="y")
+
+# Aba "Registrar Serviço" com formulário e auto-preenchimento
+tab_servico = Frame(notebook, bg='#B6B6B6')
+notebook.add(tab_servico, text="Registrar Serviço")
+
+def montar_aba_servico():
+    # Tabela de preços fixa
+    tabela_precos = {
+        "Barba": 30,
+        "Bigode": 10,
+        "Corte": 40,
+        "Cabelo e Alisamento": 80,
+        "Cabelo e Barba": 60,
+        "Luzes": 150,
+        "Platinado": 200,
+        "Sobrancelha": 10
+    }
+
+    Label(tab_servico, text="Serviço:", bg='#B6B6B6').pack(pady=5)
+    servico_var = StringVar(value=list(tabela_precos.keys())[0])
+    servico_combo = ttk.Combobox(
+        tab_servico,
+        values=list(tabela_precos.keys()),
+        textvariable=servico_var,
+        state="readonly"
+    )
+    servico_combo.pack()
+
+    Label(tab_servico, text="Valor (R$):", bg='#B6B6B6').pack(pady=5)
+    valor_entry = Entry(tab_servico)
+    valor_entry.pack()
+
+    Label(tab_servico, text="Barbeiro:", bg='#B6B6B6').pack(pady=5)
+    barbeiro_cb = ttk.Combobox(tab_servico, values=["Bruno", "Luis"], state="readonly")
+    barbeiro_cb.pack()
+    barbeiro_cb.current(0)
+
+    def atualizar_valor(event):
+        servico = servico_var.get()
+        if servico in tabela_precos:
+            valor_entry.delete(0, tk.END)
+            valor_entry.insert(0, str(tabela_precos[servico]))
+
+    # Preenche valor inicial e faz bind no combobox
+    atualizar_valor(None)
+    servico_combo.bind("<<ComboboxSelected>>", atualizar_valor)
+
+    def salvar_servico():
+        # Preserva a lógica de salvar existente
+        if registrar_servico(servico_var.get(), valor_entry.get(), barbeiro_cb.get()):
+            messagebox.showinfo("Sucesso", "Serviço registrado com sucesso!")
+
+    Button(tab_servico, text="Salvar", bg="#BBD4F2", fg="black", command=salvar_servico).pack(pady=10)
+
+# Inicializa a aba de serviço
+montar_aba_servico()
+
+# Menu lateral
+Label(sidebar, text="Menu", bg='#B6B6B6', font=("Arial", 11, "bold")).pack(anchor='w', padx=2, pady=(0,4))
+
+criar_tile(sidebar, "Novo Produto", "➕", abrir_janela_cadastro)
+criar_tile(sidebar, "Entrada de Estoque", "⬆", lambda: abrir_janela_movimentacao("ENTRADA"))
+criar_tile(sidebar, "Saída de Estoque", "⬇", lambda: abrir_janela_movimentacao("SAÍDA"))
+criar_tile(sidebar, "Definir Preços", "💲", abrir_janela_precos)
+criar_tile(sidebar, "Registrar Serviço", "💈", abrir_janela_servico)
+criar_tile(sidebar, "Fechamento de Caixa", "🧾", lambda: abrir_janela_fechamento_caixa())
+
+# Atualiza a listagem inicial e inicia o loop principal
+atualizar_listagem()
+root.mainloop()
