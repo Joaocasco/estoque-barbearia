@@ -29,11 +29,11 @@ O desenvolvimento contou com o **uso moderado de ferramentas de IA** para otimiz
 
 ## 📸 Screenshots do Sistema
 
-*(**NOTA:** Substitua os placeholders abaixo pelas suas capturas de tela reais. Este é o ponto mais importante!)*
-
 | Tela Principal (Estoque com Alerta) | Janela de Fechamento de Caixa |
 | :---: | :---: |
-| ![Tela de Estoque demonstrando o alerta visual de falta de produtos.](https://br.pinterest.com/anacraudiaaa/tela-inicial/) | ![Janela de Fechamento de Caixa com resumo financeiro e filtros.](https://br.freepik.com/fotos-vetores-gratis/fechamento-caixa) |
+| ![Tela de Estoque demonstrando o alerta visual de falta de produtos.] <img width="411" height="179" alt="alerta" src="https://github.com/user-attachments/assets/44cf33ed-403e-4439-aec3-f255a0a6f060" />
+ | ![Janela de Fechamento de Caixa com resumo financeiro e filtros.] <img width="1914" height="1023" alt="fechamento" src="https://github.com/user-attachments/assets/f7e87db3-0321-4001-afe0-072f03c30e93" />
+ |
 
 ---
 
