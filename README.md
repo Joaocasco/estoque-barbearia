@@ -85,4 +85,4 @@ Este projeto foi desenvolvido por:
 * **João Vitor De Souza Casco**
 * **Nicolas Vinicius dos Santos Dias** (Colaborador)
 
-Este projeto está licenciado sob a licença **MIT** *(Recomendação: Crie o arquivo LICENSE)*.
+Este projeto está licenciado sob a licença **MIT**.
